@@ -1,0 +1,467 @@
+---
+title: "Session 1 - Text coding (sentiment analysis)"
+author: "Ana Macanovic"
+date: "2024-11-26"
+output: html_document
+---
+
+
+In this part of the workshop, we will explore the basics of sentiment analysis.
+Sentiment analysis aims to identify affective states in written text, often aiming
+to differentiate texts that reflect a positive sentiment from texts that reflect a 
+negative sentiment. We will use a sample of sentences that discuss various movies, 
+downloaded from [here](https://www.kaggle.com/competitions/si650winter11/data?select=training.txt).
+
+Before we start, we define a helping function that will take care of installing
+and loading the necessary R packages:
+```{r}
+## check which packages need to be loaded/installed
+# adapted from Jochem Tolsma
+fpackage_check <- function(packages) {
+  for (package in packages){
+    if (!require(package, character.only = TRUE)) {
+      install.packages(package, dependencies = TRUE)
+      library(package, character.only = TRUE)
+    }
+  }
+}
+```
+
+
+First, download and install all the necessary packages.
+
+```{r, message = F, warning = F}
+package_list <- c("tidytext",  # helpful for various text analysis pipelines
+                  "dplyr",  # useful for data wrangling in R
+                  "stringr", # operations on strings/texts
+                  "readr",  # reading in .csv files
+                  "remotes", # needed to install packages from github
+                  "quanteda", # working with textual corpora
+                  "randomForest", # random forest R package
+                  "caret", # for text analysis in general, here we use it for performance evaluation
+                  "tm", # text preprocessing 
+                  "httr" # for making requests
+) 
+# installing the packages
+fpackage_check(package_list)
+
+# install the additional package from github
+remotes::install_github("quanteda/quanteda.sentiment")
+
+# load this package
+library(quanteda.sentiment)
+```
+
+
+## Data preparation and cleaning
+
+Now, load in the dataset and add a variable that will uniquely identify each text:
+```{r, message=F, }
+# read in the dataset
+twitter_dataset <- read_csv('1_sentiment_analysis.csv',
+                            show_col_types = FALSE)
+
+# add an ID variable
+twitter_dataset$doc_id <- rownames(twitter_dataset)
+```
+
+Inspect the dataset to get a good idea of its format. 
+```{r}
+# let us inspect the dataset
+head(twitter_dataset)
+```
+
+Our dataset contains a column
+named "text", where all the sentences are stored. In addition, there is a column
+"sentiment", which denotes a manually determined sentiment in this sentene (1 for
+positive, 0 for negative). This dataset was manually coded to determine the sentiment. 
+Finally, the dataset has the "doc_id" column with unique identifiers we just added above.
+
+Having manual labels is helpful for two reasons:
+1. We can compare how our analysis methods perform comapred to trained manual coders (humans);
+2. We can use these manually assigned labels to train some machine learning models later on.
+
+In general, of course, we would not have all the texts we are interested in manually coded.
+Usually, only a subset is evaluated manually, while the rest is then analysed automatically.
+
+
+Now, let us start preparing the texts for later analysis.
+
+First, we can lowercase the text and make sure we remove any special characters
+which could confuse our text analysis tools:
+```{r}
+# lowercase the texts
+twitter_dataset$text <- tolower(twitter_dataset$text)
+
+# clean them up a bit, removing any special characters (exlcuding letters, numbers, and punctuation marks)
+twitter_dataset$text <- gsub("[^\x20-\x7E]", "",twitter_dataset$text)
+```
+
+
+## Dictionary analysis
+
+In automatic text analysis, dictionaries are just lists of words corresponding to
+relevant concepts we are seeking in text. In our example, we would have a list
+of words corresponding to positive texts, and a list correspondign to negative texts.
+
+Dictionary methods then search through all the words in the text, identify those
+belonging to different dictionaries, and count them. We will see how it works through an 
+example below.
+
+### Method 1: Simple word lists
+
+Now, let us start with the simplest example to understand the logic of
+dictionary analysis. Let us make dictionaries of positive and negative texts 
+as follows:
+- positive: "awesome"
+- negative: "terrible"
+
+We can then just search for those words in texts, and denote texts that
+contain these words as containing positive/negative sentiment.
+```{r}
+# this is the general logic - we look up relevant words in our texts
+# and we can look these up in our texts using simple functions
+twitter_dataset$positive <- str_detect(twitter_dataset$text, "awesome")
+twitter_dataset$negative <- str_detect(twitter_dataset$text, "terrible")
+```
+
+Inspect texts containing the positive word "awesome":
+```{r}
+# let's check some texts that we now select as positive or negative
+twitter_dataset %>%
+  filter(positive == TRUE)%>%
+  head(5)
+```
+
+Inspect texts contianing the negative word "terrible":
+```{r}
+# let's check some texts that we now select as positive or negative
+twitter_dataset %>%
+  filter(negative == TRUE)%>%
+  head(5)
+```
+
+Now, we can check how well this simple model does in comparison to the "sentiment"
+column 
+
+```{r}
+# set texts with positive keywords as 1; and the rest as 0
+twitter_dataset$simple_prediction <- ifelse(twitter_dataset$positive == TRUE, 1, 0)
+
+# get a simple accuracy measure - how many match the "truth"?
+# how many texts in our simple prediction match the correct coding?
+length(which(twitter_dataset$simple_prediction == twitter_dataset$sentiment))
+
+# so, our analysis has an accuracy of 68.5%
+length(which(twitter_dataset$simple_prediction == twitter_dataset$sentiment))/nrow(twitter_dataset)*100
+```
+
+### Method 2: Existing dictionaries
+
+We can also use dictionaries assembled by other researchers for this purpose.
+Here, we will use the well-known dictionary created by Minqing Hu and Bing Liu for
+analyzing customer reviews online. See more information [here](https://www.cs.uic.edu/~liub/publications/kdd04-revSummary.pdf).
+
+We obtain this dictionary for an R package called quanteda.sentiment.
+
+Let us list some words in this dictionary to get a better idea of its structure:
+```{r}
+# we can use the  dictionary available in the quanteda.sentiment package
+# let us first check some words
+print(data_dictionary_geninqposneg, max_nval = 20)
+```
+To use this dictionary from the quanteda.sentiment package, we need to convert our
+dataset into a corpus. More generally, a corpus is just a body of all texts of interest.
+In text analysis, corpora are sometimes specific R objects that match the dictionary
+analysis functions of the corresponding R packages. 
+
+Here is a corpus object as created by the [quanteda](https://quanteda.io/) R package.
+Effectively, it is just a list of texts accompanied by document IDs that help
+R distinguish between them.
+```{r}
+# convert our data to a corpus 
+twitter_corpus <- quanteda::corpus(twitter_dataset)
+twitter_corpus
+```
+We can then use the same quanteda R package to analyse the texts using the Hu & Liu 
+dictionary. This method will output a numerical score, based on the prevalence and
+strenght of positive and negative words contained in each text. The logic is similar to 
+the simple logic above, but the analysis is a bit more complex.
+
+First, we can obtain a data frame with sentiment scores as per this dictionary:
+```{r}
+# get the polarity scores
+polarity_scores <- twitter_corpus %>%
+  quanteda.sentiment::textstat_polarity(dictionary = data_dictionary_HuLiu)
+
+# rename the column for clarity
+colnames(polarity_scores)[2] <- "hu_liu_lexicon"
+
+polarity_scores %>% 
+  head(5)
+
+```
+
+Now we can merge these scores with our original text dataset and inspect them to see how the dictionary scores relate to 
+the textual content:
+```{r}
+# merge them back with out text
+twitter_dataset <- merge(twitter_dataset,
+                         polarity_scores,
+                         by = "doc_id")
+
+twitter_dataset %>%
+  select(text, hu_liu_lexicon)%>%
+  head(5)
+```
+
+But these are numerical scores, and we would like a binary indicator of positive/negative
+sentiment. We will use a simple heuristic here, checking if the score of each text
+is lower or higher than the mean of scores in the whole dataset:
+```{r}
+# now we want to determine a cutoff for positive/negative coding
+# usually, it's helpful to check the score distribution
+summary(twitter_dataset$hu_liu_lexicon)
+
+# let us say anything above the mean is positive, and anything below is negative
+twitter_dataset$hu_liu_lexicon_prediction <- ifelse(twitter_dataset$hu_liu_lexicon >= -0.1752, 1, 0)
+```
+
+Now we can once again check how well this method performs:
+```{r}
+# and check how well we've done
+# how many texts in our simple prediction match the correct coding?
+length(which(twitter_dataset$hu_liu_lexicon_prediction == twitter_dataset$sentiment))
+
+# so, our analysis has an accuracy of 90.84%
+length(which(twitter_dataset$hu_liu_lexicon_prediction == twitter_dataset$sentiment))/nrow(twitter_dataset)*100
+```
+
+## Supervised machine learning
+
+Now, let us explore the possibility of using supervised machine learning for automatic
+sentiment analysis.
+Supervised machine learning algorithms try to link features of texts (usually word counts)
+with the target variable (here, positive/negative sentiment). We will use the manually
+assigned labels to "teach" a machine learning algorithm the characteristics of
+positive and negative texts.
+
+Recall that, when using supervised machine learning methods, we need to separate the
+data we use to "train" (i.e., "teach") the model which text patterns correspond to
+sentiment labels and the data we use to "test" (i.e., "evaluate") how well the model
+performs on new data. 
+
+We need to split our data into a training and a test set. We will do this by 
+drawing 1s and 2s from a distribution with probabilities of 90 and 20% respectively.
+The resulting string of numbers will have 80% of 1s, and 20% of 2s. We will then use these
+strings to select 80% and 20% of the dataset for model training and evaluation.
+This is a simple way to do this and helps us understand what is going on. There are also many 
+dedicated functions in R that do this automatically.
+```{r}
+# set the seed to make sure this script is reproducible every time we run it
+set.seed(123)
+# get the list of 1s and 2s.
+training_test_indices <- sample(2, nrow(twitter_dataset), replace = TRUE, prob = c(0.8, 0.2))
+```
+
+Now, we move on to create a Document-Term Matrix from our dataset. A document-term matrix (DTM)
+is a data format that represents textual data in the following way:
+1. rows represent individual documents (texts/sentences)
+2. columns represent individual terms (words)
+3. fields represent counts of terms in documents
+
+This will become clearer below.
+
+Let us create a DTM from our texts using the "tm" R package:
+```{r}
+# create a corpus using the "tm" package for easier handling
+dtm_corpus <- tm::Corpus(VectorSource(twitter_dataset$text))
+
+# create a document-term matrix, removing punctuation and numbers along the way
+dtm_matrix <- tm::DocumentTermMatrix(dtm_corpus,
+                                 list(
+                                   removePunctuation=TRUE,
+                                   removeNumbers = TRUE))
+
+# now convert this object to a regular matrix
+dtm_matrix <- as.data.frame(as.matrix(dtm_matrix))
+```
+Let us check the first 10 columns for the first five documents. We can see that the word 
+"awesome" appears once in the first text, and does not appear in texts 2-5. Article "the"
+appears once in texts 1 and 4, twice in texts 2 and 3, but does not appear at all in text 5, etc.
+```{r}
+# check it out
+dtm_matrix[1:5, 1:10]
+```
+Random Forest (and other machine learning algorithms) use these DTMs as input - 
+the word counts per text are treated as features (variables) that are then linked
+to the "sentiment" label of each text by the algorithm. It then tries to learn
+the coding patterns and apply them to next texts (which also need to be represented
+as DTMs).
+
+If we check the number of dimensions of this matrix, we will see it has 1103 rows
+(exactly as many as our dataset - i.e., the number of texts) and 2267 columns - 
+which is the number of unique words in our dataset.
+```{r}
+# dimensions
+nrow(dtm_matrix)
+ncol(dtm_matrix)
+```
+Now, before we feed this DTM into the Random Forest algorithm, we first ensure that
+column names are compatible with the algorithm (e.g., if column names are called "else",
+this will result in an error because it conflicts with an R function). Then, we
+bind the DTM with the "sentiment" column from our original dataset. 
+Finally, we will split our DTM into a training and a test DTM. It is very important
+that the training and test DTMs have identical columns - the model will not be able
+to predict sentiment labels for the new texts if not all columns from the training 
+DTM are present.
+
+```{r}
+colnames(dtm_matrix) <- paste0("word_", colnames(dtm_matrix))
+# 
+# # combine the matrix and the sentiment column
+dtm_matrix <- cbind(dtm_matrix, as.factor(twitter_dataset$sentiment))
+# # name the sentiment column appropriately
+colnames(dtm_matrix)[ncol(dtm_matrix)] <- "sentiment"
+
+
+# split into the training and test sets using the indices
+training_dtm <- dtm_matrix[training_test_indices == 1,]
+test_dtm <- dtm_matrix[training_test_indices == 2,]
+```
+
+Now, using a "randomForest" function from the randomForest R package, we
+can train a simple model suited for classification. Below, we specify that we 
+are predicting "sentiment" using (~) all the other variables in our dataset (reprsented
+by a ., which is a convention in R). We specify that the training_dtm is our training 
+dataset. Finally, as Random Forest models can be used for both regression and classification, 
+we specify that we are performing a classification task (i.e., we are determining
+if each text belongs - 1, or does not belong - 0, to a certain category - in this case, the category
+of positive texts).
+
+Below we "train" the model:
+```{r}
+random_forest_model <- randomForest(sentiment ~., 
+                                    data=training_dtm, 
+                                    type = "classification")
+```
+
+
+Now, we can use this model to predict the sentiment on the test_dtm.
+Bear in mind that the "predict" function we use below is designed in such a 
+way that it will automatically disregard the "sentiment" column, and only
+use the other columns the test_dtm. 
+```{r}
+random_forest_prediction <- predict(random_forest_model, 
+                                    newdata = test_dtm)
+```
+
+Finally, we can once again take a look at the accuracy of this model by comparing
+the prediction with the sentiment column in our test dataset. We see that predicting
+with a random forest model delivers accuracy of 96.7%:
+```{r}
+# how many texts in our simple prediction match the correct coding?
+length(which(random_forest_prediction == twitter_dataset$sentiment[training_test_indices == 2]))
+
+# so, our analysis has an accuracy of:
+length(which(random_forest_prediction == twitter_dataset$sentiment[training_test_indices == 2]))/nrow(twitter_dataset[training_test_indices == 2,])*100
+```
+
+## Zero-shot learning with generative Large Language Models
+
+Finally, let us explore the power of generative large language models
+in coding texts with very simple instructions.
+We will be using OpenAI's GPT models.
+
+We send a request to OpenAI's [API](https://openai.com/index/openai-api/) - an
+interface that allows us to communicate with Large Language models using
+simple "calls" - sets of instructions that send our request to the model hosted
+by OpenAI, and then receive the output from the model. This allows us to use
+the models without having to manually copy and paste texts into ChatGPT.
+
+We use the code from [here](https://rpubs.com/nirmal/setting_chat_gpt_R).
+
+First, we need an API key - a string of characters that authorises our
+requests and links them to our account. You need to make an account, 
+request an API key, and load money into your account - since using GPT
+models costs money. Here we will all use the same key that I will deactivate 
+after this workshop. 
+
+Set the API key:
+```{r, eval = F}
+open_ai_api <- ''
+```
+
+Now, we will loop through all the texts in the "test" dataset and ask GPT 4o model, 
+OpenAI's most advanced model, to determine whether each text is positive or negative.
+Bear in mind that GPT only needs an instruction written in natural language (also known
+as a "prompt"). It will then follow this instruction and output a result. 
+
+We write our prompt so that we instruct the model to:
+1. read each text
+2. output 0 if the text is negative and 1 if the text is positive
+3. output only the 0/1 values and nothing else (since these models have a tendency
+to elaborate on their answers, which we do not need now)
+
+These models do not have to be "trained" to learn the patterns - 
+we are, in fact, relying on the knowledge that they already "contain". This is why
+this type of classification is called zero-shot, as the model needs "zero" examples of
+the task we require it to do, unlike random forest which needed a substantial number
+of example texts.
+Thus, in principle, we could ask it to classify all the texts in our dataset and
+compare its' performance to the manual coding (i.e., there is no need to separate
+a training and a test set). However, to save on time and money, here we will only
+evaluate the 221 texts in the test set.
+
+Below is our loop, where we create a new prompt with the instructions and the content
+of each text, and then ask for the model's output, before adding this output into a 
+list (model_ouput).
+We borrow a lot of the code below from [here](https://rpubs.com/nirmal/setting_chat_gpt_R).
+
+```{r, eval = F}
+# select the texts in the test dataset
+texts_to_analyse <- twitter_dataset$text[training_test_indices == 2]
+# initialize a vector that will store model outputs
+model_output <- c()
+
+# loop through the individual texts
+for (text in texts_to_analyse){
+  # create a prompt, pasting the generic instruction together with the current text
+  prompt <- paste0("Output 0 if the following text is negative, and 1 if this text is positive. Do not output any other text! Here is the text: ", text)
+  
+  # create a request that will be sent to the model
+  llm_response <- POST(
+    # use the URL pointing towards the OpenAI's API
+    url = "https://api.openai.com/v1/chat/completions",
+    # add our API key to the "header" so that OpenAI recognizes we have access to their models
+    add_headers(Authorization = paste("Bearer", open_ai_api)),
+    # select the output type - we will use json
+    content_type_json(),
+    # encode the value to json format
+    encode = "json",
+    # and then specify which model we want, and which prompt we send to the model
+    body = list(
+      model = "gpt-4o-2024-08-06", # Use gpt-4o
+      messages = list(list(role = "user", 
+                           content = prompt))
+    )
+  )
+  
+  # extract the text that the model outputs from a list of various responses we receive back
+  # and append it to the list of responses
+  model_output <- c(model_output, content(llm_response)$choices[[1]]$message$content)
+  
+}
+```
+
+Finally, we can evaluate the performance of this model, just as we've done before.
+Using the newest GPT model delivers accuracy of 93%:
+```{r, eval = F}
+# and check how well we've done
+# how many texts in our simple prediction match the correct coding?
+length(which(model_output == twitter_dataset$sentiment[training_test_indices == 2]))
+
+# so, our analysis has an accuracy of 93%
+length(which(model_output == twitter_dataset$sentiment[training_test_indices == 2]))/length(twitter_dataset$sentiment[training_test_indices == 2])*100
+```
+

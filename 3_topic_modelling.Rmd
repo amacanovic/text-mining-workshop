@@ -1,0 +1,310 @@
+---
+title: "Session 3 - Topic modelling"
+author: "Ana Macanovic"
+date: "2024-11-26"
+output: html_document
+---
+
+This script evaluates unsupervised machine learning models for topic modelling.
+
+We will survey the following models:
+
+1. LDA - [Latent Dirichlet Allocation](https://www.ibm.com/topics/latent-dirichlet-allocation) - an unsupervised method
+
+2. keyATM - a so-called "semi-supevised" method using keywords in combination with topic modelling, see more [here](https://keyatm.github.io/keyATM/)
+
+
+
+Before we start, we define a helping function that will take care of installing
+and loading the necessary R packages:
+```{r}
+## check which packages need to be loaded/installed
+# adapted from Jochem Tolsma
+fpackage_check <- function(packages) {
+  for (package in packages){
+    if (!require(package, character.only = TRUE)) {
+      install.packages(package, dependencies = TRUE)
+      library(package, character.only = TRUE)
+    }
+  }
+}
+```
+
+Then, let us load all the necessary R packages:
+```{r message = F, warning = F}
+package_list <- c("tidytext",  # helpful for various text analysis pipelines
+                  "dplyr",  # useful for data wrangling in R
+                  "readr",  # reading in .csv files
+                  "topicmodels", # function for the LDA
+                  "keyATM", # function for keyATM
+                  "tm", # for document-term matrices
+                  "quanteda", # for document-feature matrices
+                  "ggplot2" # plotting words and topics
+)
+# installing the packages
+fpackage_check(package_list)
+```
+
+
+## Data loading
+
+Now, load the data. We will be using the "Associated press" dataset from the
+"topicmodels" R package.
+
+This is a dataset containing  2246 news articles published around 1988 by the Associated Press,
+an American news agency. Bear in mind that this dataset is already in the DTM (document-term matrix)
+format we discussed during the first sesssion.
+
+Below, we first load this dataset:
+```{r}
+data("AssociatedPress")
+```
+
+If we want to inspect it, we can transform it into a regular matrix and check some 
+rows/columns. Below, we see that word "aaron" appears in the first document once;
+the word "abs" appears in the fifth document twice, etc.
+```{r}
+ap_dtm <- as.matrix(AssociatedPress)
+
+ap_dtm[175:180, 1:10]
+```
+We can also check the number of rows (texts/documents) and columns (words) in this
+dataset. We see that the dataset contains 2246 documents, and more than 10 thousand 
+columns - signifying unique words (here called terms).
+```{r}
+AssociatedPress
+```
+
+Let us remove so-called "sparse terms" from our DTM. 
+We will not go into details here, but the idea is 
+the following - many words in texts only appear in a few texts (e.g., particular
+names, specific terms) and might not be of interest to us. However, each word
+that appears at least once will take up a column in the dataset - and most of
+the fields will contain zeroes, as this word does not appear in most of the texts.
+The presence of such words increases the computation time for our algorithms
+without necessarily providing us with important information. Therefore, we
+can remove such words from our DTM using the "removeSparseTerms" function. The
+higher the second parameter in this function (below is .99), the more texts a
+word needs to appear in in order to be retained. Let us subset the DTM first,
+and then remove sparse terms:
+```{r}
+ap_dtm_subset <- AssociatedPress[1:1000,]
+
+ap_dtm_subset <- tm::removeSparseTerms(AssociatedPress, .99)
+```
+
+If we now inspect the new DTM, we will see that it has substantially less 
+columns (words/terms), only 3063:
+```{r}
+ap_dtm_subset
+```
+
+"Sparsity reduction" is often used in automatic text analysis under the assumption
+that infrequent words contribute little important information, but increase the
+computational cost. Depending on the particular application, however, you might
+want to retain rare, but important terms in your DTM.
+
+Unfortunately, applying this procedure can cause our DTM to contain rows with only
+zeroes (because we have removed all words for some texts). Below, we just implement
+a technical fix that removes any words where all the values are 0 (i.e., we have
+no word count information for them):
+```{r}
+rowTotals <- apply(ap_dtm_subset , 1, sum) #Find the sum of words in each Document
+ap_dtm_subset  <- ap_dtm_subset[rowTotals> 0, ]           #remove all docs without words
+```
+
+Check how many rows we've removed - turns out there was only one problematic text.
+```{r}
+ap_dtm_subset
+```
+
+
+## Latent Dirichlet Allocation
+
+To read more about how the LDA workds, you can consult [this](https://cbail.github.io/ids704/topic-modeling/Topic_Modeling.html) excellent guide. 
+There, you can also find more R code examples.
+
+In short, LDA will look at word frequencies (in the DTM) in texts and try to determine
+which words appear in the same document more than one would expect them to by chance. 
+Based on this, it groups words into "topics" - and also outputs the extent to which
+each text is made up from each of the topics.
+
+Because LDA only relies on the probability distributions of words already in the data -
+and does not need any manual input (e.g., category labels, as we have seen in the
+session on sentiment classification), it is called an "unsupervised" machine learning
+method. This is unlike random forest algorithms we have surveyed before, which are
+a "supervised" machine learning algorithm - that is, they need some type of "ground
+truth" to learn from. 
+
+When working with LDA, you have to determine the number of topics that you want the
+algorithm to identify. This can be done based on experience, a-priori expectations,
+or by using special tools (like the one [here](https://cran.r-project.org/web/packages/ldatuning/index.html)).
+
+For now, we will seek 10 topics for this example case. 
+
+We now fit the LDA model using the "AssociatedPress" DTM object we loaded into memory.
+We set the "seed" - just to ensure [reproducibility](https://www.statology.org/set-seed-in-r/). 
+We set the parameter k - the number of topics - to 10.
+```{r}
+lda_model <- LDA(ap_dtm_subset, 
+                 k=10, 
+                 control = list(seed = 123))
+```
+
+Now, we can extract the model's output.
+
+There are two interesting things about LDA output:
+1. words constituting different topics;
+2.  topics constituting different texts;
+
+We will start by inspecting the topics. We first extract the model content
+using the "tidy" function:
+```{r}
+lda_topics <- tidy(lda_model)
+```
+
+The resulting dataframe contains words in our dataset, and the beta values for each
+words' association with each of the 10 topics. In simple terms, the higher the beta,
+the more associated this word is with a certain topic as per the LDA model.
+```{r}
+lda_topics %>%
+  head(5)
+```
+
+We can now plot the 15 most relevant words for each topic to get a high-level overview
+of these topics (code courtery of Julia Silge). First, we will select the 15 words with
+the highest beta score per topic:
+```{r}
+topic_words <- lda_topics %>%
+  group_by(topic) %>% # grouping by topic
+  top_n(15, beta) # selecting 15 words with the highest beta value
+```
+
+And now plot them out:
+```{r fig.width=15, fig.height=10}
+topic_words %>%
+   mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic)))+
+   geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip()+
+   theme(plot.title = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 13),
+        axis.text.x = element_text(size = 12) ,
+        axis.title.x = element_text(size = 13),
+        legend.title=element_text(size=13), 
+        legend.text=element_text(size=12))
+```
+
+We can now some time to interpret these results a bit.
+
+
+Another piece of information we can extract from our LDA model is the probability
+distribution of topics within texts. In simpler terms - how much of this text is
+made up of which topic?
+
+First, we  extract these topic distributions from the model:
+```{r}
+lda_topic_distributions <- lda_model@gamma
+```
+
+And then we can inspect them for the first five texts, to get a general
+idea of what is going on. We can see that the topics above are relatively
+equally distributed across text. Depending on an invidiual use case, 
+one could change certain LDA parameters to accomodate the expectation that
+texts in a dataset would mostly be made up of a few topics. 
+```{r}
+round(lda_topic_distributions[1:5, ], 3)
+```
+
+
+## keyATM
+
+We will now explore "keyATM" - a semi-supervised machine learning model. This
+model is called "semi-supervised" because it combines the approach we've seen with 
+LDA (looking at statistical properties of the data themselves) with human guidance
+we have seen in supervised methods. keyATM allows us to specify a few crucial words
+we are interested in; it will then use these words as "seeds" around which to build
+topics. This is particularly useful if you are interested in certain concepts and 
+want the model to focus on them, rather than on all relationships in the dataset.
+
+You can find more details on this method [here](https://keyatm.github.io/keyATM/).
+
+First, we will convert our DTM into a slightly different format called the
+Document-feature matrix (DFM). This is just a practical matter, as the R implementation
+we are working with prefers the DTM format of the "quanteda" R package (the DFM)
+rather the DTM format of the "tm"  R package (which is preferred by the "topicmodels"
+package we used for LDA above). You will run into many such inconsistencies when 
+working with text mining software solutions in R. Oftentimes, they reflect the 
+personal preferences of the authors who have written the software you are using.
+If you run into an issue, a simple Google search will usually help resolve it 
+quickly.
+
+Converting the DTM into a DFM:
+```{r}
+ap_dfm_subset <- as.dfm(ap_dtm_subset)
+```
+
+If we check this object, we can see it is identical in its content to the
+DTM. Here is the DTM:
+```{r}
+as.matrix(ap_dtm_subset)[175:180, 1:10]
+```
+And here is the DFM:
+```{r}
+ap_dfm_subset[175:180, 1:10]
+```
+Now, we use a special function to "process" the DFM into the data format that keyATM
+needs:
+```{r warning = F, message = F}
+keyATM_docs <- keyATM_read(texts = ap_dfm_subset)
+```
+
+
+Now, let us say we want to single out one topic that relates to police, and let the 
+model define the remaining 9 topics as it wishes. We can choose a few keywords to 
+work with:
+```{r}
+police_keywords <- c("police", "officer", "patrol")
+```
+
+And then fit the model so that this one topic is centered around the keywords 
+above, and the remaining 9 (10 - 1) are determined by the model:
+```{r message = F, warning =F}
+keyatm_model <- keyATM(
+  docs = keyATM_docs, # plug in our data
+  no_keyword_topics = 9, #  specify the number of topics without keywords
+  keywords = list(police_keywords), # specify the keywords
+  options = list(seed = 123), # and, once again, set the seed
+  model = "base" # use the base model, sufficient for now
+)
+```
+
+Now we can use a convenient function of the keyATM package to inspect the top words
+for each topic. The first topic is centered around police - just as we requested;
+the rest are rather coherent and refer to: 1988 US elections (Bush/Dukakis),
+the Gulf war, court cases, etc. As keyATM uses a different algorithm with diferent
+parameters compared to LDA, you can see that the results are also rather different
+than those we get from LDA.
+```{r}
+top_words(keyatm_model, 15)
+```
+
+
+And similar to what we have done before, we can now inspect the composition of documents
+with relation to different topics.
+
+Extract the topic distributions (called "theta" in this family of models)
+```{r}
+keyatm_topic_distributions <- keyatm_model$theta  # Document-topic distribution
+```
+
+And inspect them. You will see that the results are quite different - the first
+text seems to be very related to the "police" topic, while other topics identified
+by keyATM appear less relevant for this first text:
+```{r}
+round(keyatm_topic_distributions[1:5, ], 3)
+```
+
+

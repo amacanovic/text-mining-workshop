@@ -1,0 +1,232 @@
+---
+title: "Session 2 - Part of sentence tagging and semantic analysis"
+author: "Ana Macanovic"
+date: "2024-11-26"
+output: html_document
+---
+
+Now we will look into extracting semantic relations from text - i.e., we are interesting
+in understanding who has done what, and to whom; additionally, we are often interested
+in the features of social actors. 
+
+Sociologists conventionally did this with hand coding, but we will rely on automatic tools.
+We will rely on so-called "dependency parsers" - pieces of code that extract the
+syntactic relations between words within sentences. You can read much more in [this
+excellent paper](https://journals.sagepub.com/doi/full/10.1177/00491241221099551).
+
+We will use one such method, as well as using GPT models to extract relations from 
+text.
+
+Before we start, we define a helping function that will take care of installing
+and loading the necessary R packages:
+```{r}
+## check which packages need to be loaded/installed
+# adapted from Jochem Tolsma
+fpackage_check <- function(packages) {
+  for (package in packages){
+    if (!require(package, character.only = TRUE)) {
+      install.packages(package, dependencies = TRUE)
+      library(package, character.only = TRUE)
+    }
+  }
+}
+```
+
+Then, let us load all the necessary R packages:
+```{r message = F, warning = F}
+package_list <- c( "dplyr",  # useful for data wrangling in R
+                  "readr",  # reading in .csv files
+                  "semgram", # for semantic parsing
+                  "spacyr", # also for semantic parsing
+                  "janeaustenr", # for loading an example dataset
+                  "httr" # for making requests
+)
+# installing the packages
+fpackage_check(package_list)
+
+# after installing spacyr, we need to initialize the environment
+# remove the # in front of the code line below if you have not run it before
+# spacy_install()
+```
+
+# Loading the dataset
+
+Let us use some sentences from Jane Austen's books for this. Here we will
+choose "Emma". Load the data and check it. You will see that each
+line is a new "element" here:
+```{r}
+data(emma)
+
+head(emma, 25)
+```
+Let us extract some sentences to use:
+```{r}
+emma[405:407]
+emma[1176]
+emma[5423:5424]
+```
+Just extract these itneresting sentences into a simple list:
+```{r}
+sentences <- c("He had made his fortune, bought his house, and obtained his wife.",
+               "I know that you all love her really too well to be unjust or unkind.",
+               "Jane Fairfax was very elegant, remarkably elegant.")
+```
+
+
+
+# Using "semgram"
+
+We will start with a more conventional approach. The framework is much more complex
+than what we can cover here today, but we will start with some simple examples
+of extracting the following elements from text:
+agents (subjects), actions (verbs), patients (objects) and characterizations
+(attributes of agents/patients). This will make more sense once we look at some
+examples.
+
+First, we will extract the grammar from these sentences:
+```{r}
+sentences_grammar <- spacyr::spacy_parse(sentences, dependency = T)
+```
+
+Let us check the output on the first few words of the first sentence. We can see
+that "he" is a pronoun (PRON) which acts as the subject in this sentence (nsubj).
+"Fortune" is a noun (NOUN), which acts as the direct object in this sentence (dobj).
+```{r}
+sentences_grammar[1:5,]
+```
+
+Let us check another sentence. Here we see that "Fairfax" is the subject (nsubj) (Jane
+Fairfax is Emma's main rival in the book) and "elegant" is an adjective that describes her 
+(here called acomp, or an adjectival complement). We will use the "semgram" package to
+make sense of all these relations in just a bit. If you are interested in all kind of
+semantic intricacies, you can consult [this guide](https://downloads.cs.stanford.edu/nlp/software/dependencies_manual.pdf).
+
+```{r}
+sentences_grammar[32:35,]
+```
+
+Now we will pass this information onto a function that will allows us more easily
+extract "actors", "actions", etc. That is, we will translate grammatical categories
+into a more accessible (and useful for social scientists) vocabulary.
+
+We can now analyse all the sentences like this. First, run the function that
+extracts the elements we need:
+```{r}
+motifs_sentences <- extract_motifs(tokens = sentences_grammar,
+               markup = T)
+```
+
+Let us inspect some aspects for the output below. First, we see all the actions 
+in all three sentences. In the first sentence ("He had made his fortune, bought his 
+house, and obtained his wife."), we can see that "he" is the entity performing the actions
+of "making" and "buying". In the second sentence ( "I know that you all love her really too 
+well to be unjust or unkind"), we see the actions of "knowing" by "me" and "loving" by "you".
+
+```{r}
+motifs_sentences$actions
+```
+
+
+Moving on, we inspect the objects in these sentences. We see that in sentence 1,
+"he" has "made" a "fortune", "bought" a "house", and "obtained" a "wife". We can
+thus easily see who the actions were performed on.
+
+```{r}
+motifs_sentences$treatments
+```
+
+Next, we can look at the characteristics of certain actors. For instance, in sentence 3 
+("Jane Fairfax was very elegant, remarkably elegant"), we can now see that the model has indeed extracted  the fact that "Fairfax" was "elegant" - and twice so, since the sentence indeed repeats
+this characteristic of hers.
+
+```{r}
+motifs_sentences$characterizations
+```
+
+
+We can also explore possessions of actors, as in sentence 1 with "he" being the 
+actors who has a "fortune", a "house", and a "wife".
+
+```{r}
+motifs_sentences$possessions
+```
+
+We will stop here for now, but there is a lot one could do with these outputs further.
+A nice walktrough is provided by the author of the "semgram" package [here](https://htmlpreview.github.io/?https://github.com/omstuhler/semgram/blob/master/vignettes/demo.html).
+
+
+# Using GPT
+
+Some researchers have noted that GPT and other generative Large Language Models
+can do exceptionally well in extracting actors from text. We will give it a try
+below, using the same sentences as before.
+
+```{r}
+sentences
+```
+Once again, specify our API key:
+```{r, eval = F}
+open_ai_api <- ''
+```
+
+
+We will use a similar approach as in the session on sentiment analysis.
+
+We will loop through all the sentences and ask GPT 4o model to determine:
+
+1. who is the subject of the sentence;
+2. which actions did the subject perform;
+3. what are the characteristics of the subjects.
+4. who/what are the objects of the sentence;
+
+Bear in mind that GPT only needs an instruction written in natural language (also known
+as a "prompt"). It will then follow this instruction and output a result. 
+
+We write our prompt so that we instruct the model to:
+
+1. read each text
+2. output the information we need
+
+```{r, eval = F}
+# initialize a vector that will store model outputs
+model_output <- c()
+
+# loop through the individual texts
+for (text in sentences){
+  # create a prompt, pasting the generic instruction together with the current text
+  prompt <- paste0("Analyze the following sentence and output
+  the subject of the sentence, this subject's characteristics, actions performed by the subject, 
+  and the object(s) of the sentence. Do not add any additional explanations.
+  Here is the text: ", text)
+  
+  # create a request that will be sent to the model
+  llm_response <- POST(
+    # use the URL pointing towards the OpenAI's API
+    url = "https://api.openai.com/v1/chat/completions",
+    # add our API key to the "header" so that OpenAI recognizes we have access to their models
+    add_headers(Authorization = paste("Bearer", open_ai_api)),
+    # select the output type - we will use json
+    content_type_json(),
+    # encode the value to json format
+    encode = "json",
+    # and then specify which model we want, and which prompt we send to the model
+    body = list(
+      model = "gpt-4o-2024-08-06", # Use gpt-4o
+      messages = list(list(role = "user", 
+                           content = prompt))
+    )
+  )
+  
+  # extract the text that the model outputs from a list of various responses we receive back
+  # and append it to the list of responses
+  model_output <- c(model_output, content(llm_response)$choices[[1]]$message$content)
+  
+}
+```
+
+We can now see that GPT does not do too poorly on this task. But it does remain 
+unreliable in some cases compared to the stricter approach above:
+```{r eval = F}
+model_output
+```
+
